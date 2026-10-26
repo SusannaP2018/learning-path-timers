@@ -15,26 +15,33 @@
     <!-- Controls Form -->
     <div class="bg-slate-800 p-5 rounded-xl border border-slate-700 shadow-md mb-8 space-y-4">
       <div class="flex flex-col md:flex-row gap-4">
-        <input 
-          id="urlInput" 
-          type="text" 
-          placeholder="e.g. https://learn.microsoft.com/en-gb/training/paths/github-advanced-security/" 
-          class="flex-1 bg-slate-900 border border-slate-700 px-4 py-2 rounded-lg text-sm focus:outline-none focus:border-blue-500"
-          value="https://learn.microsoft.com/en-gb/training/paths/github-advanced-security/"
-        />
+        <!-- Autocomplete Searchable Input -->
+        <div class="flex-1 relative">
+          <input 
+            id="pathSearchInput" 
+            list="pathsDatalist" 
+            type="text" 
+            placeholder="Search path title (e.g. GitHub Advanced Security) or paste URL..." 
+            class="w-full bg-slate-900 border border-slate-700 px-4 py-2 rounded-lg text-sm focus:outline-none focus:border-blue-500"
+          />
+          <datalist id="pathsDatalist"></datalist>
+        </div>
+
+        <!-- Buffer Percentage -->
         <div class="flex items-center gap-2">
           <label class="text-xs text-slate-400 whitespace-nowrap">Buffer:</label>
           <input id="bufferInput" type="number" value="30" class="w-16 bg-slate-900 border border-slate-700 px-2 py-2 rounded-lg text-sm text-center" />
           <span class="text-sm text-slate-400">%</span>
         </div>
+
         <button id="loadBtn" class="bg-blue-600 hover:bg-blue-500 font-semibold px-6 py-2 rounded-lg text-sm transition">
-          Load Modules
+          Load Timers
         </button>
       </div>
-      <div id="statusMsg" class="text-xs text-amber-400 hidden"></div>
+      <div id="statusMsg" class="text-xs text-amber-400">Loading catalog paths...</div>
     </div>
 
-    <!-- Active Path Info -->
+    <!-- Active Path Header (Ensure these IDs exist) -->
     <div id="pathMeta" class="mb-4 hidden flex justify-between items-center">
       <h2 id="pathHeading" class="text-xl font-bold text-slate-200"></h2>
       <button id="resetAllBtn" class="text-xs bg-rose-900/40 hover:bg-rose-800/60 text-rose-300 border border-rose-700/50 px-3 py-1.5 rounded">
@@ -48,15 +55,15 @@
 
   <script>
     let modules = [];
+    let availablePaths = [];
 
-    // Synthesize a completion chime using Web Audio API
     function playChime() {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'sine';
-      osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
-      osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.3); // A5
+      osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.3);
       gain.gain.setValueAtTime(0.3, ctx.currentTime);
       gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.8);
       osc.connect(gain);
@@ -75,35 +82,74 @@
       return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
     }
 
+    async function initPathList() {
+      const statusMsg = document.getElementById('statusMsg');
+      try {
+        const res = await fetch('/api/paths');
+        availablePaths = await res.json();
+
+        const datalist = document.getElementById('pathsDatalist');
+        if (datalist) {
+          datalist.innerHTML = availablePaths.map(p => 
+            `<option value="${p.title}" data-uid="${p.uid}"></option>`
+          ).join('');
+        }
+
+        if (statusMsg) {
+          statusMsg.innerText = `Catalog ready (${availablePaths.length} learning paths loaded).`;
+          setTimeout(() => statusMsg.classList.add('hidden'), 2500);
+        }
+      } catch (err) {
+        if (statusMsg) {
+          statusMsg.innerText = 'Failed to load catalog paths. You can still paste a URL directly.';
+        }
+      }
+    }
+
+    initPathList();
+
     async function loadPath() {
-      const url = document.getElementById('urlInput').value.trim();
-      const bufferPercent = document.getElementById('bufferInput').value;
+      const inputVal = document.getElementById('pathSearchInput')?.value.trim();
+      const bufferPercent = document.getElementById('bufferInput')?.value || 30;
       const statusMsg = document.getElementById('statusMsg');
       const loadBtn = document.getElementById('loadBtn');
+      const pathHeading = document.getElementById('pathHeading');
+      const pathMeta = document.getElementById('pathMeta');
 
-      statusMsg.classList.remove('hidden');
-      statusMsg.innerText = 'Fetching modules from MS Learn...';
-      loadBtn.disabled = true;
+      if (!inputVal) return;
+
+      const matched = availablePaths.find(p => p.title.toLowerCase() === inputVal.toLowerCase());
+      const identifier = matched ? matched.uid : inputVal;
+
+      if (statusMsg) {
+        statusMsg.classList.remove('hidden');
+        statusMsg.innerText = 'Loading module timers...';
+      }
+      if (loadBtn) loadBtn.disabled = true;
 
       try {
         const res = await fetch('/api/fetch-path', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url, bufferPercent })
+          body: JSON.stringify({ identifier, bufferPercent })
         });
         const data = await res.json();
-
-        if (!res.ok) throw new Error(data.error || 'Failed to load');
+        if (!res.ok) throw new Error(data.error || 'Failed to load path');
 
         modules = data.modules;
-        document.getElementById('pathHeading').innerText = data.title;
-        document.getElementById('pathMeta').classList.remove('hidden');
-        statusMsg.classList.add('hidden');
+
+        if (pathHeading) pathHeading.innerText = data.title;
+        if (pathMeta) pathMeta.classList.remove('hidden');
+        if (statusMsg) statusMsg.classList.add('hidden');
+
         renderCards();
       } catch (err) {
-        statusMsg.innerText = `Error: ${err.message}`;
+        if (statusMsg) {
+          statusMsg.classList.remove('hidden');
+          statusMsg.innerText = `Error: ${err.message}`;
+        }
       } finally {
-        loadBtn.disabled = false;
+        if (loadBtn) loadBtn.disabled = false;
       }
     }
 
@@ -112,12 +158,10 @@
       if (!mod) return;
 
       if (mod.status === 'running') {
-        // Pause
         mod.status = 'paused';
         mod.remainingSeconds = Math.max(0, Math.round((mod.targetTimestamp - Date.now()) / 1000));
         mod.targetTimestamp = null;
       } else {
-        // Start / Resume
         if (mod.remainingSeconds <= 0) mod.remainingSeconds = mod.totalSeconds;
         mod.status = 'running';
         mod.targetTimestamp = Date.now() + mod.remainingSeconds * 1000;
@@ -144,7 +188,6 @@
       renderCards();
     }
 
-    // High-accuracy centralized tick loop
     setInterval(() => {
       let needsRerender = false;
       const now = Date.now();
@@ -160,7 +203,6 @@
             needsRerender = true;
           } else {
             mod.remainingSeconds = left;
-            // Update time display directly in DOM to avoid full HTML redraw flutter
             const timeEl = document.getElementById(`time-${mod.id}`);
             if (timeEl) timeEl.innerText = formatTime(mod.remainingSeconds);
           }
@@ -172,6 +214,10 @@
 
     function renderCards() {
       const container = document.getElementById('cardsGrid');
+      if (!container) return;
+
+      const bufferVal = document.getElementById('bufferInput')?.value || 30;
+
       container.innerHTML = modules.map(mod => {
         const isRunning = mod.status === 'running';
         const isDone = mod.status === 'done';
@@ -191,7 +237,7 @@
               <div class="text-xs text-slate-400 mb-4">
                 MS Time: <span class="text-slate-300">${mod.baseMinutes}m</span> 
                 <span class="mx-1">•</span> 
-                Buffered (+${document.getElementById('bufferInput').value}%): <span class="text-slate-300">${mod.targetMinutes}m</span>
+                Buffered (+${bufferVal}%): <span class="text-slate-300">${mod.targetMinutes}m</span>
               </div>
             </div>
 
@@ -217,8 +263,8 @@
       }).join('');
     }
 
-    document.getElementById('loadBtn').addEventListener('click', loadPath);
-    document.getElementById('resetAllBtn').addEventListener('click', () => {
+    document.getElementById('loadBtn')?.addEventListener('click', loadPath);
+    document.getElementById('resetAllBtn')?.addEventListener('click', () => {
       modules.forEach(m => resetTimer(m.id));
     });
   </script>
