@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>MS Learn Path Timers</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen p-6 font-sans">
+  <div class="max-w-4xl mx-auto">
+    <header class="mb-8">
+      <h1 class="text-3xl font-extrabold text-blue-400">MS Learn Focus Timers</h1>
+      <p class="text-slate-400 text-sm mt-1">Generate independent reading timers for each module with a custom buffer.</p>
+    </header>
+
+    <!-- Controls Form -->
+    <div class="bg-slate-800 p-5 rounded-xl border border-slate-700 shadow-md mb-8 space-y-4">
+      <div class="flex flex-col md:flex-row gap-4">
+        <input 
+          id="urlInput" 
+          type="text" 
+          placeholder="e.g. https://learn.microsoft.com/en-gb/training/paths/github-advanced-security/" 
+          class="flex-1 bg-slate-900 border border-slate-700 px-4 py-2 rounded-lg text-sm focus:outline-none focus:border-blue-500"
+          value="https://learn.microsoft.com/en-gb/training/paths/github-advanced-security/"
+        />
+        <div class="flex items-center gap-2">
+          <label class="text-xs text-slate-400 whitespace-nowrap">Buffer:</label>
+          <input id="bufferInput" type="number" value="30" class="w-16 bg-slate-900 border border-slate-700 px-2 py-2 rounded-lg text-sm text-center" />
+          <span class="text-sm text-slate-400">%</span>
+        </div>
+        <button id="loadBtn" class="bg-blue-600 hover:bg-blue-500 font-semibold px-6 py-2 rounded-lg text-sm transition">
+          Load Modules
+        </button>
+      </div>
+      <div id="statusMsg" class="text-xs text-amber-400 hidden"></div>
+    </div>
+
+    <!-- Active Path Info -->
+    <div id="pathMeta" class="mb-4 hidden flex justify-between items-center">
+      <h2 id="pathHeading" class="text-xl font-bold text-slate-200"></h2>
+      <button id="resetAllBtn" class="text-xs bg-rose-900/40 hover:bg-rose-800/60 text-rose-300 border border-rose-700/50 px-3 py-1.5 rounded">
+        Reset All Timers
+      </button>
+    </div>
+
+    <!-- Timer Cards Grid -->
+    <div id="cardsGrid" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
+  </div>
+
+  <script>
+    let modules = [];
+
+    // Synthesize a completion chime using Web Audio API
+    function playChime() {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
+      osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.3); // A5
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.8);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.8);
+    }
+
+    function formatTime(totalSecs) {
+      const h = Math.floor(totalSecs / 3600);
+      const m = Math.floor((totalSecs % 3600) / 60);
+      const s = totalSecs % 60;
+      if (h > 0) {
+        return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+      }
+      return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    }
+
+    async function loadPath() {
+      const url = document.getElementById('urlInput').value.trim();
+      const bufferPercent = document.getElementById('bufferInput').value;
+      const statusMsg = document.getElementById('statusMsg');
+      const loadBtn = document.getElementById('loadBtn');
+
+      statusMsg.classList.remove('hidden');
+      statusMsg.innerText = 'Fetching modules from MS Learn...';
+      loadBtn.disabled = true;
+
+      try {
+        const res = await fetch('/api/fetch-path', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, bufferPercent })
+        });
+        const data = await res.json();
+
+        if (!res.ok) throw new Error(data.error || 'Failed to load');
+
+        modules = data.modules;
+        document.getElementById('pathHeading').innerText = data.title;
+        document.getElementById('pathMeta').classList.remove('hidden');
+        statusMsg.classList.add('hidden');
+        renderCards();
+      } catch (err) {
+        statusMsg.innerText = `Error: ${err.message}`;
+      } finally {
+        loadBtn.disabled = false;
+      }
+    }
+
+    function toggleTimer(id) {
+      const mod = modules.find(m => m.id === id);
+      if (!mod) return;
+
+      if (mod.status === 'running') {
+        // Pause
+        mod.status = 'paused';
+        mod.remainingSeconds = Math.max(0, Math.round((mod.targetTimestamp - Date.now()) / 1000));
+        mod.targetTimestamp = null;
+      } else {
+        // Start / Resume
+        if (mod.remainingSeconds <= 0) mod.remainingSeconds = mod.totalSeconds;
+        mod.status = 'running';
+        mod.targetTimestamp = Date.now() + mod.remainingSeconds * 1000;
+      }
+      renderCards();
+    }
+
+    function resetTimer(id) {
+      const mod = modules.find(m => m.id === id);
+      if (!mod) return;
+      mod.status = 'idle';
+      mod.remainingSeconds = mod.totalSeconds;
+      mod.targetTimestamp = null;
+      renderCards();
+    }
+
+    function addTime(id, extraMinutes) {
+      const mod = modules.find(m => m.id === id);
+      if (!mod) return;
+      mod.remainingSeconds += extraMinutes * 60;
+      if (mod.status === 'running') {
+        mod.targetTimestamp += extraMinutes * 60 * 1000;
+      }
+      renderCards();
+    }
+
+    // High-accuracy centralized tick loop
+    setInterval(() => {
+      let needsRerender = false;
+      const now = Date.now();
+
+      modules.forEach(mod => {
+        if (mod.status === 'running') {
+          const left = Math.round((mod.targetTimestamp - now) / 1000);
+          if (left <= 0) {
+            mod.remainingSeconds = 0;
+            mod.status = 'done';
+            mod.targetTimestamp = null;
+            playChime();
+            needsRerender = true;
+          } else {
+            mod.remainingSeconds = left;
+            // Update time display directly in DOM to avoid full HTML redraw flutter
+            const timeEl = document.getElementById(`time-${mod.id}`);
+            if (timeEl) timeEl.innerText = formatTime(mod.remainingSeconds);
+          }
+        }
+      });
+
+      if (needsRerender) renderCards();
+    }, 500);
+
+    function renderCards() {
+      const container = document.getElementById('cardsGrid');
+      container.innerHTML = modules.map(mod => {
+        const isRunning = mod.status === 'running';
+        const isDone = mod.status === 'done';
+
+        let statusBadge = `<span class="text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300">Idle</span>`;
+        if (isRunning) statusBadge = `<span class="text-xs px-2 py-0.5 rounded bg-blue-500/20 text-blue-400 border border-blue-500/30 animate-pulse">Running</span>`;
+        if (mod.status === 'paused') statusBadge = `<span class="text-xs px-2 py-0.5 rounded bg-amber-500/20 text-amber-400 border border-amber-500/30">Paused</span>`;
+        if (isDone) statusBadge = `<span class="text-xs px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">Completed</span>`;
+
+        return `
+          <div class="p-5 rounded-xl border ${isDone ? 'border-emerald-700/50 bg-emerald-950/20' : isRunning ? 'border-blue-500/60 bg-slate-800' : 'border-slate-700 bg-slate-800/80'} shadow-lg flex flex-col justify-between">
+            <div>
+              <div class="flex justify-between items-start gap-2 mb-2">
+                <h3 class="font-medium text-slate-100 text-sm leading-snug line-clamp-2">${mod.title}</h3>
+                ${statusBadge}
+              </div>
+              <div class="text-xs text-slate-400 mb-4">
+                MS Time: <span class="text-slate-300">${mod.baseMinutes}m</span> 
+                <span class="mx-1">•</span> 
+                Buffered (+${document.getElementById('bufferInput').value}%): <span class="text-slate-300">${mod.targetMinutes}m</span>
+              </div>
+            </div>
+
+            <div>
+              <div id="time-${mod.id}" class="text-3xl font-mono font-bold tracking-tight mb-4 ${isDone ? 'text-emerald-400' : isRunning ? 'text-blue-400' : 'text-slate-200'}">
+                ${formatTime(mod.remainingSeconds)}
+              </div>
+
+              <div class="flex items-center gap-2">
+                <button onclick="toggleTimer('${mod.id}')" class="flex-1 py-1.5 px-3 rounded text-xs font-semibold ${isRunning ? 'bg-amber-600 hover:bg-amber-500 text-white' : 'bg-blue-600 hover:bg-blue-500 text-white'}">
+                  ${isRunning ? 'Pause' : mod.status === 'paused' ? 'Resume' : 'Start'}
+                </button>
+                <button onclick="resetTimer('${mod.id}')" class="py-1.5 px-3 rounded text-xs font-medium bg-slate-700 hover:bg-slate-600 text-slate-300">
+                  Reset
+                </button>
+                <button onclick="addTime('${mod.id}', 5)" class="py-1.5 px-2.5 rounded text-xs font-medium bg-slate-700 hover:bg-slate-600 text-slate-300" title="Add 5 minutes">
+                  +5m
+                </button>
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    document.getElementById('loadBtn').addEventListener('click', loadPath);
+    document.getElementById('resetAllBtn').addEventListener('click', () => {
+      modules.forEach(m => resetTimer(m.id));
+    });
+  </script>
+</body>
+</html>
